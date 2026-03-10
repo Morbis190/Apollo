@@ -9,6 +9,7 @@
 #include "process.h"
 
 #ifdef _WIN32
+  #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/session_isolation.h"
   #include "platform/common.h"
