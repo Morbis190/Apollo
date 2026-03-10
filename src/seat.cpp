@@ -6,6 +6,7 @@
 // local includes
 #include "seat.h"
 #include "logging.h"
+#include "process.h"
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
@@ -21,6 +22,7 @@ namespace seat {
   seat_ptr make_default_seat() {
     auto seat = std::make_shared<seat_t>();
     seat->id = "default";
+    seat->process = &proc::proc;
     // Empty display_name and audio_sink_id cause fallback to global config
     return seat;
   }
@@ -111,6 +113,11 @@ namespace seat {
     for (auto &s : _seats) {
       if (s->state == state_e::AVAILABLE) {
         s->state = state_e::BOUND;
+        // In multi-seat mode, each seat still uses the global process for now.
+        // Future phases will give each seat its own proc_t instance.
+        if (!s->process) {
+          s->process = &proc::proc;
+        }
         BOOST_LOG(info) << "Seat acquired: "sv << s->id;
         return s;
       }

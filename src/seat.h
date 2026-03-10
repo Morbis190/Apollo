@@ -9,6 +9,11 @@
  */
 #pragma once
 
+// local includes — forward declarations only
+namespace proc {
+  class proc_t;
+}
+
 // standard includes
 #include <memory>
 #include <mutex>
@@ -89,6 +94,17 @@ namespace seat {
 #endif
 
     state_e state = state_e::AVAILABLE;
+
+    /**
+     * @brief Process context for this seat.
+     *
+     * In single-seat mode, this points to the global `proc::proc` singleton.
+     * In multi-seat mode (future), each seat will own its own proc_t instance
+     * to allow independent app execution per seat.
+     *
+     * Non-owning pointer — lifetime managed externally.
+     */
+    proc::proc_t *process = nullptr;
 
     /**
      * @brief The session currently bound to this seat.
