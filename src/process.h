@@ -140,6 +140,14 @@ namespace proc {
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
 
+    /**
+     * @brief Set the isolated desktop target for this process context.
+     *
+     * When set, all subsequent run_command() calls will target this desktop
+     * via STARTUPINFO.lpDesktop (Windows). Empty string = default desktop.
+     */
+    void set_desktop_name(const std::string &name) { _desktop_name = name; }
+
   private:
     int _app_id = 0;
     std::string _app_name;
@@ -162,6 +170,8 @@ namespace proc {
     file_t _pipe;
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
+
+    std::string _desktop_name;  ///< Isolated desktop target (empty = default desktop)
   };
 
   boost::filesystem::path

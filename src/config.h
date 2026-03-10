@@ -290,12 +290,20 @@ namespace config {
     std::vector<server_cmd_t> server_cmds;
   };
 
+  struct multiseat_t {
+    bool enabled = false;
+    int max_seats = 4;
+    bool auto_virtual_display = true;
+    bool session_isolation = false;
+  };
+
   extern video_t video;
   extern audio_t audio;
   extern stream_t stream;
   extern nvhttp_t nvhttp;
   extern input_t input;
   extern sunshine_t sunshine;
+  extern multiseat_t multiseat;
 
   int parse(int argc, char *argv[]);
   std::unordered_map<std::string, std::string> parse_config(const std::string_view &file_content);

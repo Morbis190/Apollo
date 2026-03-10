@@ -318,7 +318,7 @@ std::string get_local_ip_for_gateway() {
   return local_ip;
 }
 
-  bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group) {
+  bp::child run_command(bool elevated, bool interactive, const std::string &cmd, boost::filesystem::path &working_dir, const bp::environment &env, FILE *file, std::error_code &ec, bp::group *group, const std::string &desktop_name) {
     // clang-format off
     if (!group) {
       if (!file) {

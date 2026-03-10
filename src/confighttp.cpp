@@ -37,6 +37,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "seat.h"
 #include "utility.h"
 #include "uuid.h"
 
@@ -1502,6 +1503,81 @@ namespace confighttp {
   }
 
   /**
+   * @brief Get seat status and configuration.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void getSeats(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    nlohmann::json output_tree;
+    output_tree["status"] = true;
+    output_tree["enabled"] = seat::manager.multi_seat_enabled();
+    output_tree["max_seats"] = seat::manager.max_seats();
+
+    nlohmann::json seats_array = nlohmann::json::array();
+    for (const auto &s : seat::manager.all_seats()) {
+      nlohmann::json seat_obj;
+      seat_obj["id"] = s->id;
+      switch (s->state) {
+        case seat::state_e::AVAILABLE:
+          seat_obj["state"] = "available";
+          break;
+        case seat::state_e::BOUND:
+          seat_obj["state"] = "bound";
+          break;
+        case seat::state_e::RELEASING:
+          seat_obj["state"] = "releasing";
+          break;
+      }
+      seat_obj["display_name"] = s->display_name;
+      seat_obj["audio_sink_id"] = s->audio_sink_id;
+      seats_array.push_back(seat_obj);
+    }
+    output_tree["seats"] = seats_array;
+
+    send_response(response, output_tree);
+  }
+
+  /**
+   * @brief Force-release a seat by ID.
+   * @param response The HTTP response object.
+   * @param request The HTTP request object.
+   */
+  void releaseSeat(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
+      return;
+    }
+
+    print_req(request);
+
+    try {
+      std::stringstream ss;
+      ss << request->content.rdbuf();
+      nlohmann::json input_tree = nlohmann::json::parse(ss.str());
+      std::string seat_id = input_tree.value("id", "");
+
+      nlohmann::json output_tree;
+      if (seat_id.empty()) {
+        output_tree["status"] = false;
+        output_tree["error"] = "Missing seat id";
+      }
+      else {
+        output_tree["status"] = seat::manager.force_release(seat_id);
+      }
+      send_response(response, output_tree);
+    }
+    catch (std::exception &e) {
+      BOOST_LOG(warning) << "ReleaseSeat: "sv << e.what();
+      bad_request(response, request, e.what());
+    }
+  }
+
+  /**
    * @brief Start the HTTPS server.
    */
   void start() {
@@ -1552,6 +1628,8 @@ namespace confighttp {
     server.resource["^/api/clients/update$"]["POST"] = updateClient;
     server.resource["^/api/clients/unpair$"]["POST"] = unpair;
     server.resource["^/api/clients/disconnect$"]["POST"] = disconnect;
+    server.resource["^/api/seats$"]["GET"] = getSeats;
+    server.resource["^/api/seats/release$"]["POST"] = releaseSeat;
     server.resource["^/api/covers/upload$"]["POST"] = uploadCover;
     server.resource["^/images/apollo.ico$"]["GET"] = getFaviconImage;
     server.resource["^/images/logo-apollo-45.png$"]["GET"] = getApolloLogoImage;
