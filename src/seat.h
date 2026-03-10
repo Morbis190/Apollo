@@ -13,6 +13,11 @@
 namespace proc {
   class proc_t;
 }
+#ifdef _WIN32
+namespace platf::session_isolation {
+  struct desktop_session_t;
+}
+#endif
 
 // standard includes
 #include <memory>
@@ -91,6 +96,17 @@ namespace seat {
      * Safe to call even if no virtual display is owned.
      */
     void teardown_virtual_display();
+
+    /**
+     * @brief Isolated desktop session for this seat (multi-seat mode only).
+     *
+     * When multi-seat is enabled, each seat gets its own Windows Desktop
+     * within a shared Window Station. Processes launched for this seat
+     * target this desktop via STARTUPINFO.lpDesktop.
+     *
+     * nullptr in single-seat mode.
+     */
+    std::unique_ptr<platf::session_isolation::desktop_session_t> desktop_session;
 #endif
 
     state_e state = state_e::AVAILABLE;
@@ -132,6 +148,13 @@ namespace seat {
   class manager_t {
   public:
     /**
+     * @brief Initialize the seat manager from configuration.
+     * @param multi_seat Whether multi-seat mode is enabled.
+     * @param max_seats Maximum number of concurrent seats.
+     */
+    void init(bool multi_seat, int max_seats);
+
+    /**
      * @brief Acquire a seat for a new session.
      * @return A seat pointer, or nullptr if no seat is available.
      */
@@ -150,16 +173,36 @@ namespace seat {
     std::vector<seat_ptr> active_seats() const;
 
     /**
+     * @brief Get all seats (regardless of state).
+     * @return Vector of all seat pointers.
+     */
+    std::vector<seat_ptr> all_seats() const;
+
+    /**
      * @brief Check if multi-seating is enabled.
      * @return true if multi-seat mode is active.
      */
     bool multi_seat_enabled() const;
 
+    /**
+     * @brief Get the maximum number of seats.
+     * @return Maximum seat count.
+     */
+    int max_seats() const;
+
+    /**
+     * @brief Force-release a seat by ID.
+     * @param seat_id The seat ID to release.
+     * @return true if a seat was found and released.
+     */
+    bool force_release(const std::string &seat_id);
+
   private:
     mutable std::mutex _mutex;
     std::vector<seat_ptr> _seats;
     seat_ptr _default_seat;  ///< Singleton seat for single-seat mode
-    bool _multi_seat = false;  ///< Driven by config (future Phase 8)
+    bool _multi_seat = false;  ///< Driven by config
+    int _max_seats = 4;
   };
 
   /**

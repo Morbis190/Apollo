@@ -35,6 +35,10 @@ extern "C" {
 #include "thread_safe.h"
 #include "utility.h"
 
+#ifdef _WIN32
+  #include "platform/windows/session_isolation.h"
+#endif
+
 #define IDX_START_A 0
 #define IDX_START_B 1
 #define IDX_INVALIDATE_REF_FRAMES 2
@@ -1018,11 +1022,17 @@ namespace stream {
         BOOST_LOG(info) << "Executing server command: " << cmd.cmd_name;
 
         auto *process = session->seat ? session->seat->process : &proc::proc;
-        auto exec_thread = std::thread([&cmd, process]{
+        std::string desktop;
+#ifdef _WIN32
+        if (session->seat && session->seat->desktop_session) {
+          desktop = session->seat->desktop_session->desktop_name;
+        }
+#endif
+        auto exec_thread = std::thread([&cmd, process, desktop]{
           std::error_code ec;
           auto env = process->get_env();
           boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd_val, env);
-          auto child = platf::run_command(cmd.elevated, true, cmd.cmd_val, working_dir, env, nullptr, ec, nullptr);
+          auto child = platf::run_command(cmd.elevated, true, cmd.cmd_val, working_dir, env, nullptr, ec, nullptr, desktop);
 
           if (ec) {
             BOOST_LOG(error) << "Failed to execute server command: " << ec.message();
@@ -2063,12 +2073,18 @@ namespace stream {
 
       if (!session.undo_cmds.empty()) {
         auto *process = session.seat ? session.seat->process : &proc::proc;
-        auto exec_thread = std::thread([cmd_list = session.undo_cmds, process]{
+        std::string desktop;
+#ifdef _WIN32
+        if (session.seat && session.seat->desktop_session) {
+          desktop = session.seat->desktop_session->desktop_name;
+        }
+#endif
+        auto exec_thread = std::thread([cmd_list = session.undo_cmds, process, desktop]{
           for (auto &cmd : cmd_list) {
             std::error_code ec;
             auto env = process->get_env();
             boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
-            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
+            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr, desktop);
             BOOST_LOG(info) << "Spawning client undo command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
             if (ec) {
               BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd.cmd << "]: System: "sv << ec.message();
@@ -2149,12 +2165,18 @@ namespace stream {
 
       if (!session.do_cmds.empty()) {
         auto *do_process = session.seat ? session.seat->process : &proc::proc;
-        auto exec_thread = std::thread([cmd_list = session.do_cmds, do_process]{
+        std::string do_desktop;
+#ifdef _WIN32
+        if (session.seat && session.seat->desktop_session) {
+          do_desktop = session.seat->desktop_session->desktop_name;
+        }
+#endif
+        auto exec_thread = std::thread([cmd_list = session.do_cmds, do_process, do_desktop]{
           for (auto &cmd : cmd_list) {
             std::error_code ec;
             auto env = do_process->get_env();
             boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
-            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
+            auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr, do_desktop);
             BOOST_LOG(info) << "Spawning client do command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
             if (ec) {
               BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd.cmd << "]: System: "sv << ec.message();

@@ -603,6 +603,8 @@ namespace config {
     {},  // server commands
   };
 
+  multiseat_t multiseat {};
+
   bool endline(char ch) {
     return ch == '\r' || ch == '\n';
   }
@@ -1301,6 +1303,12 @@ namespace config {
     bool_f(vars, "notify_pre_releases", sunshine.notify_pre_releases);
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "forward_rumble", input.forward_rumble);
+
+    // Multi-seat configuration
+    bool_f(vars, "multiseat_enabled", multiseat.enabled);
+    int_between_f(vars, "max_seats", multiseat.max_seats, {1, 16});
+    bool_f(vars, "multiseat_auto_virtual_display", multiseat.auto_virtual_display);
+    bool_f(vars, "multiseat_session_isolation", multiseat.session_isolation);
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});

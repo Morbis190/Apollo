@@ -10,6 +10,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
+  #include "platform/windows/session_isolation.h"
   #include "platform/common.h"
 #endif
 
@@ -94,6 +95,26 @@ namespace seat {
   }
 #endif
 
+  void manager_t::init(bool multi_seat, int max_seats) {
+    std::lock_guard lg(_mutex);
+    _multi_seat = multi_seat;
+    _max_seats = max_seats;
+
+    if (_multi_seat) {
+      _seats.clear();
+      for (int i = 0; i < max_seats; ++i) {
+        auto s = std::make_shared<seat_t>();
+        s->id = "seat-" + std::to_string(i);
+        s->process = &proc::proc;
+        _seats.push_back(std::move(s));
+      }
+      BOOST_LOG(info) << "Multi-seat enabled with "sv << max_seats << " seats"sv;
+    }
+    else {
+      BOOST_LOG(info) << "Single-seat mode"sv;
+    }
+  }
+
   seat_ptr manager_t::acquire() {
     std::lock_guard lg(_mutex);
 
@@ -118,6 +139,12 @@ namespace seat {
         if (!s->process) {
           s->process = &proc::proc;
         }
+#ifdef _WIN32
+        // Create an isolated desktop for this seat
+        if (auto ds = platf::session_isolation::create_isolated_desktop(s->id)) {
+          s->desktop_session = std::make_unique<platf::session_isolation::desktop_session_t>(std::move(*ds));
+        }
+#endif
         BOOST_LOG(info) << "Seat acquired: "sv << s->id;
         return s;
       }
@@ -136,6 +163,12 @@ namespace seat {
     BOOST_LOG(info) << "Seat released: "sv << seat->id;
 
 #ifdef _WIN32
+    // Clean up isolated desktop before virtual display
+    if (seat->desktop_session) {
+      platf::session_isolation::destroy_isolated_desktop(*seat->desktop_session);
+      seat->desktop_session.reset();
+    }
+
     // Clean up seat-owned virtual display before releasing
     seat->teardown_virtual_display();
 #endif
@@ -167,9 +200,52 @@ namespace seat {
     return result;
   }
 
+  std::vector<seat_ptr> manager_t::all_seats() const {
+    std::lock_guard lg(_mutex);
+
+    if (!_multi_seat) {
+      std::vector<seat_ptr> result;
+      if (_default_seat) {
+        result.push_back(_default_seat);
+      }
+      return result;
+    }
+
+    return _seats;
+  }
+
   bool manager_t::multi_seat_enabled() const {
     std::lock_guard lg(_mutex);
     return _multi_seat;
+  }
+
+  int manager_t::max_seats() const {
+    std::lock_guard lg(_mutex);
+    return _max_seats;
+  }
+
+  bool manager_t::force_release(const std::string &seat_id) {
+    std::lock_guard lg(_mutex);
+
+    for (auto &s : _seats) {
+      if (s->id == seat_id && s->state == state_e::BOUND) {
+        BOOST_LOG(info) << "Force-releasing seat: "sv << seat_id;
+
+#ifdef _WIN32
+        if (s->desktop_session) {
+          platf::session_isolation::destroy_isolated_desktop(*s->desktop_session);
+          s->desktop_session.reset();
+        }
+        s->teardown_virtual_display();
+#endif
+
+        s->state = state_e::AVAILABLE;
+        s->bound_session.reset();
+        return true;
+      }
+    }
+
+    return false;
   }
 
 }  // namespace seat

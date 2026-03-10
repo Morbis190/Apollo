@@ -33,6 +33,10 @@ extern "C" {
 #include "sync.h"
 #include "video.h"
 
+#ifdef _WIN32
+  #include "platform/windows/session_isolation.h"
+#endif
+
 namespace asio = boost::asio;
 
 using asio::ip::tcp;
@@ -1173,6 +1177,12 @@ namespace rtsp_stream {
     if (session.virtual_display && !session.seat_owns_vdisplay && seat::manager.multi_seat_enabled()) {
       session_seat->adopt_virtual_display(session.display_guid, proc::proc.display_name);
       session.seat_owns_vdisplay = true;
+    }
+
+    // Set the isolated desktop on the seat's process context so resume/pause
+    // commands target the correct desktop
+    if (session_seat->desktop_session && session_seat->process) {
+      session_seat->process->set_desktop_name(session_seat->desktop_session->desktop_name);
     }
 #endif
 

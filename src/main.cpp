@@ -21,6 +21,7 @@
 #include "system_tray.h"
 #include "upnp.h"
 #include "uuid.h"
+#include "seat.h"
 #include "video.h"
 
 #ifdef _WIN32
@@ -181,6 +182,9 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "config: '"sv << name << "' = "sv << val;
   }
   config::modified_config_settings.clear();
+
+  // Initialize seat manager from config
+  seat::manager.init(config::multiseat.enabled, config::multiseat.max_seats);
 
   if (!config::sunshine.cmd.name.empty()) {
     auto fn = cmd_to_func.find(config::sunshine.cmd.name);

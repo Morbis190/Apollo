@@ -80,6 +80,13 @@
         :platform="platform">
       </advanced>
 
+      <!-- Multi-Seat Tab -->
+      <multi-seat
+        v-if="currentTab === 'multiseat'"
+        :config="config"
+        :platform="platform">
+      </multi-seat>
+
       <container-encoders
         :current-tab="currentTab"
         :config="config"
@@ -113,6 +120,7 @@
   import Advanced from './configs/tabs/Advanced.vue'
   import AudioVideo from './configs/tabs/AudioVideo.vue'
   import ContainerEncoders from './configs/tabs/ContainerEncoders.vue'
+  import MultiSeat from './configs/tabs/MultiSeat.vue'
   import {$tp, usePlatformI18n} from './platform-i18n'
 
   let fallbackDisplayModeCache = "";
@@ -128,6 +136,7 @@
       // They will be accessible via audio-video, container-encoders only.
       AudioVideo,
       ContainerEncoders,
+      MultiSeat,
     },
     data() {
       return {
@@ -256,6 +265,16 @@
               "av1_mode": 0,
               "capture": "",
               "encoder": "",
+            },
+          },
+          {
+            id: "multiseat",
+            name: "Multi-Seat",
+            options: {
+              "multiseat_enabled": "disabled",
+              "max_seats": 4,
+              "multiseat_auto_virtual_display": "enabled",
+              "multiseat_session_isolation": "disabled",
             },
           },
           {
