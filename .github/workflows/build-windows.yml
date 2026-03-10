@@ -40,13 +40,22 @@ jobs:
             mingw-w64-ucrt-x86_64-opus
             mingw-w64-ucrt-x86_64-nlohmann-json
 
+      - name: Patch Boost version requirement
+        run: |
+          # MSYS2 boost may not match the exact version required.
+          # Remove EXACT from find_package to use whatever version is installed.
+          sed -i 's/find_package(Boost CONFIG ${BOOST_VERSION} EXACT/find_package(Boost CONFIG ${BOOST_VERSION}/' \
+            cmake/dependencies/Boost_Sunshine.cmake
+
       - name: Configure
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTS=OFF \
             -DCUDA_FAIL_ON_MISSING=OFF \
-            -DSUNSHINE_ENABLE_TRAY=ON
+            -DSUNSHINE_ENABLE_TRAY=ON \
+            -DBOOST_USE_STATIC=OFF \
+            -DFETCHCONTENT_QUIET=OFF
 
       - name: Build
         run: ninja -C build
