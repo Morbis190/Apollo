@@ -1017,9 +1017,10 @@ namespace stream {
         const auto& cmd = config::sunshine.server_cmds[cmdIndex];
         BOOST_LOG(info) << "Executing server command: " << cmd.cmd_name;
 
-        auto exec_thread = std::thread([&cmd]{
+        auto *process = session->seat ? session->seat->process : &proc::proc;
+        auto exec_thread = std::thread([&cmd, process]{
           std::error_code ec;
-          auto env = proc::proc.get_env();
+          auto env = process->get_env();
           boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd_val, env);
           auto child = platf::run_command(cmd.elevated, true, cmd.cmd_val, working_dir, env, nullptr, ec, nullptr);
 
@@ -1192,6 +1193,7 @@ namespace stream {
       }
 
       // Don't break until any pending sessions either expire or connect
+      // TODO (Phase 8): In multi-seat mode, check per-seat process state instead of global
       if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
         BOOST_LOG(info) << "Process terminated"sv;
         break;
@@ -1945,7 +1947,12 @@ namespace stream {
     session->audio.qos = platf::enable_socket_qos(ref->audio_sock.native_handle(), address, session->audio.peer.port(), platf::qos_data_type_e::audio, session->config.audioQosType != 0);
 
     BOOST_LOG(debug) << "Start capturing Audio"sv;
-    audio::capture(session->mail, session->config.audio, session);
+    audio::capture(
+      session->mail,
+      session->config.audio,
+      session,
+      session->seat ? session->seat->audio_sink_id : ""
+    );
   }
 
   namespace session {
@@ -2055,10 +2062,11 @@ namespace stream {
       input::reset(session.input);
 
       if (!session.undo_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.undo_cmds]{
+        auto *process = session.seat ? session.seat->process : &proc::proc;
+        auto exec_thread = std::thread([cmd_list = session.undo_cmds, process]{
           for (auto &cmd : cmd_list) {
             std::error_code ec;
-            auto env = proc::proc.get_env();
+            auto env = process->get_env();
             boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
             auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
             BOOST_LOG(info) << "Spawning client undo command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
@@ -2076,8 +2084,10 @@ namespace stream {
       // If this is the last session, invoke the platform callbacks
       if (--running_sessions == 0) {
         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
-        if (proc::proc.running()) {
-          proc::proc.pause();
+        // TODO (Phase 8): In multi-seat mode, pause per-seat process instead of global
+        auto *process = session.seat ? session.seat->process : &proc::proc;
+        if (process->running()) {
+          process->pause();
         } else {
           // We have no app running and also no clients anymore.
           revert_display_config = true;
@@ -2099,7 +2109,7 @@ namespace stream {
     }
 
     int start(session_t &session, const std::string &addr_string) {
-      session.input = input::alloc(session.mail);
+      session.input = input::alloc(session.mail, session.seat);
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {
@@ -2132,14 +2142,17 @@ namespace stream {
       // If this is the first session, invoke the platform callbacks
       if (++running_sessions == 1) {
         platf::streaming_will_start();
-        proc::proc.resume();
+        // TODO (Phase 8): In multi-seat mode, resume per-seat process instead of global
+        auto *process = session.seat ? session.seat->process : &proc::proc;
+        process->resume();
       }
 
       if (!session.do_cmds.empty()) {
-        auto exec_thread = std::thread([cmd_list = session.do_cmds]{
+        auto *do_process = session.seat ? session.seat->process : &proc::proc;
+        auto exec_thread = std::thread([cmd_list = session.do_cmds, do_process]{
           for (auto &cmd : cmd_list) {
             std::error_code ec;
-            auto env = proc::proc.get_env();
+            auto env = do_process->get_env();
             boost::filesystem::path working_dir = proc::find_working_directory(cmd.cmd, env);
             auto child = platf::run_command(cmd.elevated, true, cmd.cmd, working_dir, env, nullptr, ec, nullptr);
             BOOST_LOG(info) << "Spawning client do command ["sv << cmd.cmd << "] in ["sv << working_dir << ']';
