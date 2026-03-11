@@ -111,16 +111,24 @@ namespace seat {
 
     state_e state = state_e::AVAILABLE;
 
+    std::string client_uuid;  ///< UUID of the client currently bound to this seat (empty when available)
+
     /**
      * @brief Process context for this seat.
      *
      * In single-seat mode, this points to the global `proc::proc` singleton.
-     * In multi-seat mode (future), each seat will own its own proc_t instance
+     * In multi-seat mode, each seat owns its own proc_t instance via `_owned_process`
      * to allow independent app execution per seat.
-     *
-     * Non-owning pointer — lifetime managed externally.
      */
     proc::proc_t *process = nullptr;
+
+    /**
+     * @brief Owned process context for multi-seat mode.
+     *
+     * When set, this seat owns the proc_t and `process` points to it.
+     * In single-seat mode this is nullptr and `process` points to `proc::proc`.
+     */
+    std::unique_ptr<proc::proc_t> _owned_process;
 
     /**
      * @brief The session currently bound to this seat.
@@ -196,6 +204,13 @@ namespace seat {
      * @return true if a seat was found and released.
      */
     bool force_release(const std::string &seat_id);
+
+    /**
+     * @brief Find a seat bound to a specific client.
+     * @param client_uuid The client's certificate UUID.
+     * @return Seat pointer, or nullptr if not found.
+     */
+    seat_ptr find_by_client(const std::string &client_uuid) const;
 
   private:
     mutable std::mutex _mutex;

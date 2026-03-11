@@ -58,6 +58,8 @@ namespace rtsp_stream {
     std::list<crypto::command_entry_t> client_do_cmds;
     std::list<crypto::command_entry_t> client_undo_cmds;
 
+    std::shared_ptr<void> seat;  ///< Seat acquired during launch (opaque ptr to avoid circular include with seat.h)
+
   #ifdef _WIN32
     GUID display_guid{};
     bool seat_owns_vdisplay = false;  ///< If true, the seat will handle virtual display cleanup

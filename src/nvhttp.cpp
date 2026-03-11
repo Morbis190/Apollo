@@ -1281,6 +1281,23 @@ namespace nvhttp {
       return;
     }
 
+    // In multi-seat mode, acquire a seat early so the seat's proc_t
+    // (with isolated desktop already configured) is used for execute().
+    if (config::multiseat.enabled) {
+      auto acquired_seat = seat::manager.acquire();
+      if (!acquired_seat) {
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", "All seats are in use");
+        tree.put("root.gamesession", 0);
+        return;
+      }
+      // Track which client owns this seat (for cancel/cleanup)
+      acquired_seat->client_uuid = named_cert_p->uuid;
+      // Store on launch_session as opaque shared_ptr<void> (avoids circular include)
+      launch_session->seat = std::static_pointer_cast<void>(acquired_seat);
+      BOOST_LOG(info) << "Multi-seat: acquired "sv << acquired_seat->id << " for client ["sv << named_cert_p->name << ']';
+    }
+
     bool no_active_sessions = rtsp_stream::session_count() == 0;
 
     if (is_input_only) {
@@ -1299,27 +1316,57 @@ namespace nvhttp {
       }
     } else if (appid > 0 || !appuuid_str.empty()) {
       if (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) {
-        // We're basically resuming the same app
+        if (config::multiseat.enabled && launch_session->seat) {
+          // Multi-seat: launch a fresh app instance on the seat's proc_t
+          // instead of resuming the existing session's app
+          auto seat_ptr = std::static_pointer_cast<seat::seat_t>(launch_session->seat);
+          BOOST_LOG(info) << "Multi-seat: launching independent app instance on "sv << seat_ptr->id;
 
-        BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
+          const auto& apps = proc::proc.get_apps();
+          auto app_iter = std::find_if(apps.begin(), apps.end(), [&appid_str, &appuuid_str](const auto _app) {
+            return _app.id == appid_str || _app.uuid == appuuid_str;
+          });
 
-        if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
-          launch_session->client_do_cmds.clear();
-          launch_session->client_undo_cmds.clear();
-        }
+          if (app_iter != apps.end()) {
+            if (!app_iter->allow_client_commands) {
+              launch_session->client_do_cmds.clear();
+              launch_session->client_undo_cmds.clear();
+            }
 
-        if (current_appid == proc::input_only_app_id) {
-          launch_session->input_only = true;
-        }
+            auto err = seat_ptr->process->execute(*app_iter, launch_session);
+            if (err) {
+              seat::manager.release(seat_ptr);
+              tree.put("root.<xmlattr>.status_code", err);
+              tree.put("root.<xmlattr>.status_message",
+                err == 503
+                ? "Failed to initialize video capture/encoding. Is a display connected and turned on?"
+                : "Failed to start the specified application");
+              tree.put("root.gamesession", 0);
+              return;
+            }
+          }
+        } else {
+          // Single-seat: resuming the same app
+          BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
 
-        if (no_active_sessions && !proc::proc.virtual_display) {
-          display_device::configure_display(config::video, *launch_session);
-          if (video::probe_encoders()) {
-            tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+          if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
+            launch_session->client_do_cmds.clear();
+            launch_session->client_undo_cmds.clear();
+          }
 
-            return;
+          if (current_appid == proc::input_only_app_id) {
+            launch_session->input_only = true;
+          }
+
+          if (no_active_sessions && !proc::proc.virtual_display) {
+            display_device::configure_display(config::video, *launch_session);
+            if (video::probe_encoders()) {
+              tree.put("root.resume", 0);
+              tree.put("root.<xmlattr>.status_code", 503);
+              tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+
+              return;
+            }
           }
         }
       } else {
@@ -1341,7 +1388,16 @@ namespace nvhttp {
           launch_session->client_undo_cmds.clear();
         }
 
-        auto err = proc::proc.execute(*app_iter, launch_session);
+        int err;
+        if (config::multiseat.enabled && launch_session->seat) {
+          auto seat_ptr = std::static_pointer_cast<seat::seat_t>(launch_session->seat);
+          err = seat_ptr->process->execute(*app_iter, launch_session);
+          if (err) {
+            seat::manager.release(seat_ptr);
+          }
+        } else {
+          err = proc::proc.execute(*app_iter, launch_session);
+        }
         if (err) {
           tree.put("root.<xmlattr>.status_code", err);
           tree.put(
@@ -1516,9 +1572,21 @@ namespace nvhttp {
       // In multi-seat mode, only terminate the requesting client's session
       auto client_uuid = named_cert_p->uuid;
       BOOST_LOG(info) << "Multi-seat: cancelling session for client ["sv << named_cert_p->name << "] uuid ["sv << client_uuid << ']';
+
+      // Terminate the streaming session for this client
       rtsp_stream::terminate_session_by_uuid(client_uuid);
 
-      // Only terminate the process and revert display if no sessions remain
+      // Find and release the seat bound to this client
+      auto client_seat = seat::manager.find_by_client(client_uuid);
+      if (client_seat) {
+        BOOST_LOG(info) << "Multi-seat: releasing "sv << client_seat->id << " for client ["sv << named_cert_p->name << ']';
+        if (client_seat->process && client_seat->process->running() > 0) {
+          client_seat->process->terminate();
+        }
+        seat::manager.release(client_seat);
+      }
+
+      // Only revert global display config if no sessions remain
       if (rtsp_stream::session_count() == 0) {
         if (proc::proc.running() > 0) {
           proc::proc.terminate();

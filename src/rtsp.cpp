@@ -29,7 +29,9 @@ extern "C" {
 #include "network.h"
 #include "process.h"
 #include "rtsp.h"
+#include "seat.h"
 #include "stream.h"
+#include "uuid.h"
 #include "sync.h"
 #include "video.h"
 
@@ -1185,28 +1187,50 @@ namespace rtsp_stream {
       return;
     }
 
-    // Acquire a seat for this session
-    auto session_seat = seat::manager.acquire();
-    if (!session_seat) {
-      BOOST_LOG(error) << "No available seat for new session"sv;
-      respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
-      return;
+    // Check if the seat was already acquired during launch() (multi-seat mode)
+    seat::seat_ptr session_seat;
+    if (session.seat) {
+      session_seat = std::static_pointer_cast<seat::seat_t>(session.seat);
+      BOOST_LOG(info) << "Reusing seat "sv << session_seat->id << " from launch"sv;
+    } else {
+      session_seat = seat::manager.acquire();
+      if (!session_seat) {
+        BOOST_LOG(error) << "No available seat for new session"sv;
+        respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
+        return;
+      }
     }
 
 #ifdef _WIN32
-    // In multi-seat mode, transfer virtual display ownership to the seat.
-    // Each seat manages its own display lifecycle independently from the app.
-    // In single-seat mode, proc::terminate() handles cleanup as before,
-    // because the app may outlive the streaming session (paused state).
-    if (session.virtual_display && !session.seat_owns_vdisplay && seat::manager.multi_seat_enabled()) {
-      session_seat->adopt_virtual_display(session.display_guid, proc::proc.display_name);
-      session.seat_owns_vdisplay = true;
-    }
+    if (seat::manager.multi_seat_enabled()) {
+      // Multi-seat: create a per-seat virtual display if the seat doesn't have one yet
+      if (!session_seat->vdisplay_guid && config::multiseat.auto_virtual_display) {
+        // Generate a GUID from the client's unique_id for the virtual display
+        auto device_uuid = uuid_util::uuid_t::parse(session.unique_id);
+        GUID display_guid;
+        memcpy(&display_guid, &device_uuid, sizeof(GUID));
 
-    // Set the isolated desktop on the seat's process context so resume/pause
-    // commands target the correct desktop
-    if (session_seat->desktop_session && session_seat->process) {
-      session_seat->process->set_desktop_name(session_seat->desktop_session->desktop_name);
+        int target_fps = session.fps ? session.fps : 60000;
+        if (target_fps < 1000) target_fps *= 1000;
+
+        if (session_seat->setup_virtual_display(
+              session.unique_id, session.device_name,
+              session.width, session.height, target_fps, display_guid)) {
+          BOOST_LOG(info) << "Multi-seat: created virtual display for "sv << session_seat->id;
+          session.seat_owns_vdisplay = true;
+        }
+      }
+    } else {
+      // Single-seat: transfer virtual display ownership from proc to seat
+      if (session.virtual_display && !session.seat_owns_vdisplay) {
+        session_seat->adopt_virtual_display(session.display_guid, proc::proc.display_name);
+        session.seat_owns_vdisplay = true;
+      }
+
+      // Set the isolated desktop on the seat's process context
+      if (session_seat->desktop_session && session_seat->process) {
+        session_seat->process->set_desktop_name(session_seat->desktop_session->desktop_name);
+      }
     }
 #endif
 
