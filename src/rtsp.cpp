@@ -1203,21 +1203,28 @@ namespace rtsp_stream {
 
 #ifdef _WIN32
     if (seat::manager.multi_seat_enabled()) {
-      // Multi-seat: create a per-seat virtual display if the seat doesn't have one yet
-      if (!session_seat->vdisplay_guid && config::multiseat.auto_virtual_display) {
-        // Generate a GUID from the client's unique_id for the virtual display
-        auto device_uuid = uuid_util::uuid_t::parse(session.unique_id);
-        GUID display_guid;
-        memcpy(&display_guid, &device_uuid, sizeof(GUID));
-
-        int target_fps = session.fps ? session.fps : 60000;
-        if (target_fps < 1000) target_fps *= 1000;
-
-        if (session_seat->setup_virtual_display(
-              session.unique_id, session.device_name,
-              session.width, session.height, target_fps, display_guid)) {
-          BOOST_LOG(info) << "Multi-seat: created virtual display for "sv << session_seat->id;
+      if (!session_seat->vdisplay_guid) {
+        if (session.virtual_display) {
+          // The seat's proc_t already created a virtual display during execute().
+          // Adopt it to the seat so the seat manages its lifecycle.
+          session_seat->adopt_virtual_display(session.display_guid, session_seat->process->display_name);
           session.seat_owns_vdisplay = true;
+          BOOST_LOG(info) << "Multi-seat: adopted virtual display from execute() for "sv << session_seat->id;
+        } else if (config::multiseat.auto_virtual_display) {
+          // No virtual display was created during execute() — create one now
+          auto device_uuid = uuid_util::uuid_t::parse(session.unique_id);
+          GUID display_guid;
+          memcpy(&display_guid, &device_uuid, sizeof(GUID));
+
+          int target_fps = session.fps ? session.fps : 60000;
+          if (target_fps < 1000) target_fps *= 1000;
+
+          if (session_seat->setup_virtual_display(
+                session.unique_id, session.device_name,
+                session.width, session.height, target_fps, display_guid)) {
+            BOOST_LOG(info) << "Multi-seat: created virtual display for "sv << session_seat->id;
+            session.seat_owns_vdisplay = true;
+          }
         }
       }
     } else {
