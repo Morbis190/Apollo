@@ -577,6 +577,26 @@ namespace rtsp_stream {
     }
 
     /**
+     * @brief Terminate all sessions belonging to a specific client UUID.
+     * @param uuid The client's unique identifier.
+     */
+    void clear_by_uuid(const std::string &uuid) {
+      auto lg = _session_slots.lock();
+
+      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+        auto &slot = *(*i);
+        if (stream::session::uuid_match(slot, uuid)) {
+          BOOST_LOG(info) << "Terminating session for client UUID: "sv << uuid;
+          stream::session::stop(slot);
+          stream::session::join(slot);
+          i = _session_slots->erase(i);
+        } else {
+          i++;
+        }
+      }
+    }
+
+    /**
      * @brief Inserts the provided session into the set of sessions.
      * @param session The session to insert.
      */
@@ -672,6 +692,10 @@ namespace rtsp_stream {
 
   void terminate_sessions() {
     server.clear(true);
+  }
+
+  void terminate_session_by_uuid(const std::string &uuid) {
+    server.clear_by_uuid(uuid);
   }
 
   int send(tcp::socket &sock, const std::string_view &sv) {

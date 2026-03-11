@@ -23,6 +23,7 @@
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "seat.h"
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -996,9 +997,27 @@ namespace nvhttp {
       if (config::input.enable_input_only_mode && current_appid != proc::input_only_app_id) {
         current_appid = 0;
       }
-      tree.put("root.currentgame", current_appid);
-      tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
-      tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+
+      // In multi-seat mode, report server as FREE if seats are available.
+      // This prevents Moonlight from showing "quit current app?" when another
+      // client tries to connect — each client gets its own seat.
+      if (config::multiseat.enabled && current_appid > 0) {
+        auto active = seat::manager.active_seats();
+        if ((int)active.size() < seat::manager.max_seats()) {
+          // Seats available — let new clients connect without quit prompt
+          tree.put("root.currentgame", current_appid);
+          tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+          tree.put("root.state", "SUNSHINE_SERVER_FREE");
+        } else {
+          tree.put("root.currentgame", current_appid);
+          tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+          tree.put("root.state", "SUNSHINE_SERVER_BUSY");
+        }
+      } else {
+        tree.put("root.currentgame", current_appid);
+        tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+        tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+      }
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
@@ -1229,11 +1248,22 @@ namespace nvhttp {
           || (!appuuid_str.empty() && appuuid_str != current_app_uuid)
         )
       ) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
-
-        return;
+        // In multi-seat mode, allow concurrent app launches on separate seats
+        if (config::multiseat.enabled) {
+          auto active = seat::manager.active_seats();
+          if ((int)active.size() >= seat::manager.max_seats()) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", 503);
+            tree.put("root.<xmlattr>.status_message", "All seats are in use");
+            return;
+          }
+          BOOST_LOG(info) << "Multi-seat: allowing concurrent launch (active seats: "sv << active.size() << '/' << seat::manager.max_seats() << ')';
+        } else {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
+          return;
+        }
       }
     }
 
@@ -1482,14 +1512,29 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
-    rtsp_stream::terminate_sessions();
+    if (config::multiseat.enabled) {
+      // In multi-seat mode, only terminate the requesting client's session
+      auto client_uuid = named_cert_p->uuid;
+      BOOST_LOG(info) << "Multi-seat: cancelling session for client ["sv << named_cert_p->name << "] uuid ["sv << client_uuid << ']';
+      rtsp_stream::terminate_session_by_uuid(client_uuid);
 
-    if (proc::proc.running() > 0) {
-      proc::proc.terminate();
+      // Only terminate the process and revert display if no sessions remain
+      if (rtsp_stream::session_count() == 0) {
+        if (proc::proc.running() > 0) {
+          proc::proc.terminate();
+        }
+        display_device::revert_configuration();
+      }
+    } else {
+      rtsp_stream::terminate_sessions();
+
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      }
+
+      // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
+      display_device::revert_configuration();
     }
-
-    // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
-    display_device::revert_configuration();
   }
 
   void appasset(resp_https_t response, req_https_t request) {

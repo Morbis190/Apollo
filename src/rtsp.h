@@ -90,6 +90,12 @@ namespace rtsp_stream {
   void terminate_sessions();
 
   /**
+   * @brief Terminates streaming sessions belonging to a specific client.
+   * @param uuid The client's unique identifier (certificate UUID).
+   */
+  void terminate_session_by_uuid(const std::string &uuid);
+
+  /**
    * @brief Runs the RTSP server loop.
    */
   void start();
