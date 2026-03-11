@@ -67,14 +67,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Apollo-Windows-Installer
-          path: |
-            *.exe
+          path: build/cpack_artifacts/*.exe
           retention-days: 90
 
       - name: Create release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: "*.exe"
+          files: "build/cpack_artifacts/*.exe"
           draft: true
           generate_release_notes: true
