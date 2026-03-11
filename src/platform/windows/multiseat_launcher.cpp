@@ -8,28 +8,26 @@
 #include <string>
 #include <sstream>
 
-// lib includes
-#include "src/logging.h"
-
-// platform includes
+// platform includes — winsock2.h must come before windows.h
+#include <winsock2.h>
 #include <windows.h>
 #include <wtsapi32.h>
 #include <userenv.h>
 
+// lib includes
+#include "src/logging.h"
+
 // local includes
 #include "multiseat_launcher.h"
 #include "src/config.h"
-#include "src/rtsp.h"
-#include "src/nvhttp.h"
 
 using namespace std::string_view_literals;
 
 namespace platf::multiseat_launcher {
 
-  /**
-   * @brief Default base port for Apollo.
-   */
   static constexpr uint16_t DEFAULT_BASE_PORT = 47989;
+  static constexpr int RTSP_PORT_OFFSET = 21;   ///< Same as RTSP_PORT_OFFSET
+  static constexpr int HTTP_PORT_OFFSET = 0;     ///< Same as HTTP_PORT_OFFSET
 
   bool is_multi_session_available() {
     // Check if multiple active sessions exist (indicates TermWrap/RDPWrap is working)
@@ -234,11 +232,11 @@ namespace platf::multiseat_launcher {
   }
 
   uint16_t worker_rtsp_port(const worker_t &worker) {
-    return (uint16_t)(DEFAULT_BASE_PORT + worker.port_offset + rtsp_stream::RTSP_SETUP_PORT);
+    return (uint16_t)(DEFAULT_BASE_PORT + worker.port_offset + RTSP_PORT_OFFSET);
   }
 
   uint16_t worker_http_port(const worker_t &worker) {
-    return (uint16_t)(DEFAULT_BASE_PORT + worker.port_offset + nvhttp::PORT_HTTP);
+    return (uint16_t)(DEFAULT_BASE_PORT + worker.port_offset + HTTP_PORT_OFFSET);
   }
 
 }  // namespace platf::multiseat_launcher
