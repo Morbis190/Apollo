@@ -42,6 +42,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
+  #include "platform/windows/multiseat_launcher.h"
 #endif
 
 using namespace std::literals;
@@ -1296,6 +1297,63 @@ namespace nvhttp {
       // Store on launch_session as opaque shared_ptr<void> (avoids circular include)
       launch_session->seat = std::static_pointer_cast<void>(acquired_seat);
       BOOST_LOG(info) << "Multi-seat: acquired "sv << acquired_seat->id << " for client ["sv << named_cert_p->name << ']';
+
+#ifdef _WIN32
+      // In multi_instance mode, launch a worker process in a separate Windows session
+      // The worker handles all streaming independently — the coordinator just routes
+      if (config::multiseat.mode == "multi_instance" && !config::sunshine.worker_mode) {
+        // Find the user account for this seat
+        auto active = seat::manager.active_seats();
+        int seat_index = (int)active.size() - 1;  // this seat was just acquired
+
+        if (seat_index < (int)config::multiseat.users.size() &&
+            seat_index < (int)config::multiseat.passwords.size()) {
+          auto &username = config::multiseat.users[seat_index];
+          auto &password = config::multiseat.passwords[seat_index];
+          int port_offset = (seat_index + 1) * 100;  // seat-0 → offset 100, seat-1 → offset 200, etc.
+
+          // Shared credentials dir = coordinator's credentials directory
+          auto cred_dir = std::filesystem::path(config::nvhttp.pkey).parent_path().string();
+
+          auto worker = platf::multiseat_launcher::launch_worker(
+            username, password, port_offset, cred_dir, acquired_seat->id);
+
+          if (worker) {
+            acquired_seat->worker = std::make_unique<platf::multiseat_launcher::worker_t>(std::move(*worker));
+
+            // Give the worker a moment to start up
+            std::this_thread::sleep_for(3s);
+
+            // Return the worker's RTSP port so Moonlight connects to the worker
+            tree.put("root.<xmlattr>.status_code", 200);
+            tree.put("root.sessionUrl0",
+              std::format("{}{}:{}",
+                launch_session->rtsp_url_scheme,
+                net::addr_to_url_escaped_string(request->local_endpoint().address()),
+                platf::multiseat_launcher::worker_rtsp_port(*acquired_seat->worker)
+              )
+            );
+            tree.put("root.gamesession", 1);
+            rtsp_stream::launch_session_raise(launch_session);
+            return;
+          } else {
+            BOOST_LOG(error) << "Failed to launch worker for seat "sv << acquired_seat->id;
+            seat::manager.release(acquired_seat);
+            tree.put("root.<xmlattr>.status_code", 500);
+            tree.put("root.<xmlattr>.status_message", "Failed to launch worker process");
+            tree.put("root.gamesession", 0);
+            return;
+          }
+        } else {
+          BOOST_LOG(error) << "No user account configured for seat index "sv << seat_index;
+          seat::manager.release(acquired_seat);
+          tree.put("root.<xmlattr>.status_code", 503);
+          tree.put("root.<xmlattr>.status_message", "No user account configured for this seat");
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
+#endif
     }
 
     bool no_active_sessions = rtsp_stream::session_count() == 0;

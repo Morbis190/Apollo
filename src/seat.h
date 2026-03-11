@@ -17,6 +17,9 @@ namespace proc {
 namespace platf::session_isolation {
   struct desktop_session_t;
 }
+namespace platf::multiseat_launcher {
+  struct worker_t;
+}
 #endif
 
 // standard includes
@@ -107,6 +110,16 @@ namespace seat {
      * nullptr in single-seat mode.
      */
     std::unique_ptr<platf::session_isolation::desktop_session_t> desktop_session;
+
+    /**
+     * @brief Worker process for multi-instance mode.
+     *
+     * When multiseat_mode is "multi_instance", each seat launches a separate
+     * Apollo worker process in its own Windows session. This tracks that worker.
+     *
+     * nullptr in single-seat mode or desktop_object mode.
+     */
+    std::unique_ptr<platf::multiseat_launcher::worker_t> worker;
 #endif
 
     state_e state = state_e::AVAILABLE;
