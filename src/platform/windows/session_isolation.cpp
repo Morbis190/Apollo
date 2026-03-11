@@ -5,6 +5,7 @@
 
 // local includes
 #include "session_isolation.h"
+#include "misc.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 
