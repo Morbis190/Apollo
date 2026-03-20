@@ -6,6 +6,7 @@
 #include <atomic>
 #include <bitset>
 #include <list>
+#include <future>
 #include <thread>
 #include <unordered_map>
 
@@ -1848,6 +1849,8 @@ namespace video {
       // Allow the encoding device a final opportunity to set/unset or override any options
       encode_device->init_codec_options(ctx.get(), &options);
 
+      BOOST_LOG(debug) << "Opening codec ["sv << video_format.name << "]..."sv;
+      logging::log_flush();
       if (auto status = avcodec_open2(ctx.get(), codec, &options)) {
         char err_str[AV_ERROR_MAX_STRING_SIZE] {0};
 
@@ -2543,7 +2546,10 @@ namespace video {
       return -1;
     }
 
-    auto session = make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device));
+    // Use shared_ptr so the encode thread can safely outlive this function
+    // if it gets detached due to a driver hang.
+    std::shared_ptr<encode_session_t> session(
+      make_encode_session(disp.get(), encoder, config, disp->width, disp->height, std::move(encode_device)).release());
     if (!session) {
       return -1;
     }
@@ -2559,10 +2565,49 @@ namespace video {
     session->request_idr_frame();
 
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
-    while (!packets->peek()) {
-      if (encode(1, *session, packets, nullptr, {})) {
+
+    // Run encode asynchronously because some encoder drivers (e.g. AMF) can
+    // block indefinitely in avcodec_receive_packet after producing the first
+    // packet.  The packet is already queued by the time the hang occurs, so
+    // we poll the queue with a timeout instead of waiting for encode() to
+    // return.
+    auto encode_done = std::make_shared<std::atomic<bool>>(false);
+    auto encode_result = std::make_shared<std::atomic<int>>(0);
+
+    // Capture session and packets by value (shared_ptr copy) so the thread
+    // keeps them alive if it outlives this function scope.
+    std::thread encode_thread([session, packets, encode_done, encode_result]() {
+      *encode_result = encode(1, *session, packets, nullptr, {});
+      *encode_done = true;
+    });
+
+    // Wait up to 10 seconds for a packet to appear or encode to finish.
+    constexpr auto packet_timeout = std::chrono::seconds(10);
+    auto deadline = std::chrono::steady_clock::now() + packet_timeout;
+
+    while (!packets->peek() && !*encode_done) {
+      if (std::chrono::steady_clock::now() > deadline) {
+        BOOST_LOG(error) << "Encoder validation timed out waiting for packet"sv;
+        encode_thread.detach();
         return -1;
       }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // If encode finished with an error and no packet was produced, fail.
+    if (*encode_done && *encode_result != 0 && !packets->peek()) {
+      encode_thread.join();
+      return -1;
+    }
+
+    // We have a packet (or encode succeeded).  If encode is still running
+    // (blocked in a second receive_packet), detach it — the thread safely
+    // owns its resources via shared_ptr.
+    if (*encode_done) {
+      encode_thread.join();
+    } else {
+      BOOST_LOG(debug) << "Encode thread still running after packet produced; detaching"sv;
+      encode_thread.detach();
     }
 
     auto packet = packets->pop();
@@ -2587,6 +2632,39 @@ namespace video {
     }
 
     return flag;
+  }
+
+  /**
+   * @brief Run validate_config with a timeout to prevent hanging during encoder probing.
+   * @details Some encoder/driver combinations (e.g. AMF HEVC on certain AMD systems) can
+   *   hang indefinitely during avcodec_open2 or the encode loop. This wrapper runs
+   *   validate_config in a detached thread and returns -1 if it doesn't complete in time.
+   */
+  int validate_config_with_timeout(std::shared_ptr<platf::display_t> disp, const encoder_t &encoder, const config_t &config,
+    std::chrono::seconds timeout = std::chrono::seconds(30)) {
+    auto &video_format = encoder.codec_from_config(config);
+
+    std::promise<int> promise;
+    auto future = promise.get_future();
+
+    // Copy config by value so the detached thread doesn't hold a dangling reference.
+    // encoder is safe because it's a module-level static that outlives any detached thread.
+    auto config_copy = config;
+    std::thread validation_thread([disp, &encoder, config_copy, p = std::move(promise)]() mutable {
+      p.set_value(validate_config(disp, encoder, config_copy));
+    });
+
+    if (future.wait_for(timeout) == std::future_status::ready) {
+      validation_thread.join();
+      return future.get();
+    }
+
+    // Validation timed out — detach the thread (it may eventually complete or be
+    // cleaned up at process exit) and report failure.
+    BOOST_LOG(error) << "Encoder validation timed out for ["sv << video_format.name
+                     << "] after "sv << timeout.count() << " seconds"sv;
+    validation_thread.detach();
+    return -1;
   }
 
   bool validate_encoder(encoder_t &encoder, bool expect_failure) {
@@ -2622,13 +2700,13 @@ namespace video {
 
     // If we're expecting failure, use the autoselect ref config first since that will always succeed
     // if the encoder is available.
-    auto max_ref_frames_h264 = expect_failure ? -1 : validate_config(disp, encoder, config_max_ref_frames);
-    auto autoselect_h264 = max_ref_frames_h264 >= 0 ? max_ref_frames_h264 : validate_config(disp, encoder, config_autoselect);
+    auto max_ref_frames_h264 = expect_failure ? -1 : validate_config_with_timeout(disp, encoder, config_max_ref_frames);
+    auto autoselect_h264 = max_ref_frames_h264 >= 0 ? max_ref_frames_h264 : validate_config_with_timeout(disp, encoder, config_autoselect);
     if (autoselect_h264 < 0) {
       return false;
     } else if (expect_failure) {
       // We expected failure, but actually succeeded. Do the max_ref_frames probe we skipped.
-      max_ref_frames_h264 = validate_config(disp, encoder, config_max_ref_frames);
+      max_ref_frames_h264 = validate_config_with_timeout(disp, encoder, config_max_ref_frames);
     }
 
     std::vector<std::pair<validate_flag_e, encoder_t::flag_e>> packet_deficiencies {
@@ -2647,13 +2725,13 @@ namespace video {
       config_autoselect.videoFormat = 1;
 
       if (disp->is_codec_supported(encoder.hevc.name, config_autoselect)) {
-        auto max_ref_frames_hevc = validate_config(disp, encoder, config_max_ref_frames);
+        auto max_ref_frames_hevc = validate_config_with_timeout(disp, encoder, config_max_ref_frames);
 
         // If H.264 succeeded with max ref frames specified, assume that we can count on
         // HEVC to also succeed with max ref frames specified if HEVC is supported.
         auto autoselect_hevc = (max_ref_frames_hevc >= 0 || max_ref_frames_h264 >= 0) ?
                                  max_ref_frames_hevc :
-                                 validate_config(disp, encoder, config_autoselect);
+                                 validate_config_with_timeout(disp, encoder, config_autoselect);
 
         for (auto [validate_flag, encoder_flag] : packet_deficiencies) {
           encoder.hevc[encoder_flag] = (max_ref_frames_hevc & validate_flag && autoselect_hevc & validate_flag);
@@ -2675,13 +2753,13 @@ namespace video {
       config_autoselect.videoFormat = 2;
 
       if (disp->is_codec_supported(encoder.av1.name, config_autoselect)) {
-        auto max_ref_frames_av1 = validate_config(disp, encoder, config_max_ref_frames);
+        auto max_ref_frames_av1 = validate_config_with_timeout(disp, encoder, config_max_ref_frames);
 
         // If H.264 succeeded with max ref frames specified, assume that we can count on
         // AV1 to also succeed with max ref frames specified if AV1 is supported.
         auto autoselect_av1 = (max_ref_frames_av1 >= 0 || max_ref_frames_h264 >= 0) ?
                                 max_ref_frames_av1 :
-                                validate_config(disp, encoder, config_autoselect);
+                                validate_config_with_timeout(disp, encoder, config_autoselect);
 
         for (auto [validate_flag, encoder_flag] : packet_deficiencies) {
           encoder.av1[encoder_flag] = (max_ref_frames_av1 & validate_flag && autoselect_av1 & validate_flag);
