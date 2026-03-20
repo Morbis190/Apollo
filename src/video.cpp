@@ -2576,7 +2576,7 @@ namespace video {
 
     // Capture session and packets by value (shared_ptr copy) so the thread
     // keeps them alive if it outlives this function scope.
-    std::thread encode_thread([session, packets, encode_done, encode_result]() {
+    std::thread encode_thread([session, packets, encode_done, encode_result]() mutable {
       *encode_result = encode(1, *session, packets, nullptr, {});
       *encode_done = true;
     });
