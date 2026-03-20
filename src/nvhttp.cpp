@@ -23,6 +23,7 @@
 // local includes
 #include "config.h"
 #include "display_device.h"
+#include "seat.h"
 #include "file_handler.h"
 #include "globals.h"
 #include "httpcommon.h"
@@ -41,6 +42,7 @@
 
 #ifdef _WIN32
   #include "platform/windows/virtual_display.h"
+  #include "platform/windows/multiseat_launcher.h"
 #endif
 
 using namespace std::literals;
@@ -996,9 +998,27 @@ namespace nvhttp {
       if (config::input.enable_input_only_mode && current_appid != proc::input_only_app_id) {
         current_appid = 0;
       }
-      tree.put("root.currentgame", current_appid);
-      tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
-      tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+
+      // In multi-seat mode, report server as FREE if seats are available.
+      // This prevents Moonlight from showing "quit current app?" when another
+      // client tries to connect — each client gets its own seat.
+      if (config::multiseat.enabled && current_appid > 0) {
+        auto active = seat::manager.active_seats();
+        if ((int)active.size() < seat::manager.max_seats()) {
+          // Seats available — let new clients connect without quit prompt
+          tree.put("root.currentgame", current_appid);
+          tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+          tree.put("root.state", "SUNSHINE_SERVER_FREE");
+        } else {
+          tree.put("root.currentgame", current_appid);
+          tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+          tree.put("root.state", "SUNSHINE_SERVER_BUSY");
+        }
+      } else {
+        tree.put("root.currentgame", current_appid);
+        tree.put("root.currentgameuuid", proc::proc.get_running_app_uuid());
+        tree.put("root.state", current_appid > 0 ? "SUNSHINE_SERVER_BUSY" : "SUNSHINE_SERVER_FREE");
+      }
     } else {
       tree.put("root.currentgame", 0);
       tree.put("root.currentgameuuid", "");
@@ -1229,11 +1249,22 @@ namespace nvhttp {
           || (!appuuid_str.empty() && appuuid_str != current_app_uuid)
         )
       ) {
-        tree.put("root.resume", 0);
-        tree.put("root.<xmlattr>.status_code", 400);
-        tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
-
-        return;
+        // In multi-seat mode, allow concurrent app launches on separate seats
+        if (config::multiseat.enabled) {
+          auto active = seat::manager.active_seats();
+          if ((int)active.size() >= seat::manager.max_seats()) {
+            tree.put("root.resume", 0);
+            tree.put("root.<xmlattr>.status_code", 503);
+            tree.put("root.<xmlattr>.status_message", "All seats are in use");
+            return;
+          }
+          BOOST_LOG(info) << "Multi-seat: allowing concurrent launch (active seats: "sv << active.size() << '/' << seat::manager.max_seats() << ')';
+        } else {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 400);
+          tree.put("root.<xmlattr>.status_message", "An app is already running on this host");
+          return;
+        }
       }
     }
 
@@ -1249,6 +1280,80 @@ namespace nvhttp {
       tree.put("root.gamesession", 0);
 
       return;
+    }
+
+    // In multi-seat mode, acquire a seat early so the seat's proc_t
+    // (with isolated desktop already configured) is used for execute().
+    if (config::multiseat.enabled) {
+      auto acquired_seat = seat::manager.acquire();
+      if (!acquired_seat) {
+        tree.put("root.<xmlattr>.status_code", 503);
+        tree.put("root.<xmlattr>.status_message", "All seats are in use");
+        tree.put("root.gamesession", 0);
+        return;
+      }
+      // Track which client owns this seat (for cancel/cleanup)
+      acquired_seat->client_uuid = named_cert_p->uuid;
+      // Store on launch_session as opaque shared_ptr<void> (avoids circular include)
+      launch_session->seat = std::static_pointer_cast<void>(acquired_seat);
+      BOOST_LOG(info) << "Multi-seat: acquired "sv << acquired_seat->id << " for client ["sv << named_cert_p->name << ']';
+
+#ifdef _WIN32
+      // In multi_instance mode, launch a worker process in a separate Windows session
+      // The worker handles all streaming independently — the coordinator just routes
+      if (config::multiseat.mode == "multi_instance" && !config::sunshine.worker_mode) {
+        // Find the user account for this seat
+        auto active = seat::manager.active_seats();
+        int seat_index = (int)active.size() - 1;  // this seat was just acquired
+
+        if (seat_index < (int)config::multiseat.users.size() &&
+            seat_index < (int)config::multiseat.passwords.size()) {
+          auto &username = config::multiseat.users[seat_index];
+          auto &password = config::multiseat.passwords[seat_index];
+          int port_offset = (seat_index + 1) * 100;  // seat-0 → offset 100, seat-1 → offset 200, etc.
+
+          // Shared credentials dir = coordinator's credentials directory
+          auto cred_dir = std::filesystem::path(config::nvhttp.pkey).parent_path().string();
+
+          auto worker = platf::multiseat_launcher::launch_worker(
+            username, password, port_offset, cred_dir, acquired_seat->id);
+
+          if (worker) {
+            acquired_seat->worker = std::make_unique<platf::multiseat_launcher::worker_t>(std::move(*worker));
+
+            // Give the worker a moment to start up
+            std::this_thread::sleep_for(3s);
+
+            // Return the worker's RTSP port so Moonlight connects to the worker
+            tree.put("root.<xmlattr>.status_code", 200);
+            tree.put("root.sessionUrl0",
+              std::format("{}{}:{}",
+                launch_session->rtsp_url_scheme,
+                net::addr_to_url_escaped_string(request->local_endpoint().address()),
+                platf::multiseat_launcher::worker_rtsp_port(*acquired_seat->worker)
+              )
+            );
+            tree.put("root.gamesession", 1);
+            rtsp_stream::launch_session_raise(launch_session);
+            return;
+          } else {
+            BOOST_LOG(error) << "Failed to launch worker for seat "sv << acquired_seat->id;
+            seat::manager.release(acquired_seat);
+            tree.put("root.<xmlattr>.status_code", 500);
+            tree.put("root.<xmlattr>.status_message", "Failed to launch worker process");
+            tree.put("root.gamesession", 0);
+            return;
+          }
+        } else {
+          BOOST_LOG(error) << "No user account configured for seat index "sv << seat_index;
+          seat::manager.release(acquired_seat);
+          tree.put("root.<xmlattr>.status_code", 503);
+          tree.put("root.<xmlattr>.status_message", "No user account configured for this seat");
+          tree.put("root.gamesession", 0);
+          return;
+        }
+      }
+#endif
     }
 
     bool no_active_sessions = rtsp_stream::session_count() == 0;
@@ -1269,27 +1374,57 @@ namespace nvhttp {
       }
     } else if (appid > 0 || !appuuid_str.empty()) {
       if (appid == current_appid || (!appuuid_str.empty() && appuuid_str == current_app_uuid)) {
-        // We're basically resuming the same app
+        if (config::multiseat.enabled && launch_session->seat) {
+          // Multi-seat: launch a fresh app instance on the seat's proc_t
+          // instead of resuming the existing session's app
+          auto seat_ptr = std::static_pointer_cast<seat::seat_t>(launch_session->seat);
+          BOOST_LOG(info) << "Multi-seat: launching independent app instance on "sv << seat_ptr->id;
 
-        BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
+          const auto& apps = proc::proc.get_apps();
+          auto app_iter = std::find_if(apps.begin(), apps.end(), [&appid_str, &appuuid_str](const auto _app) {
+            return _app.id == appid_str || _app.uuid == appuuid_str;
+          });
 
-        if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
-          launch_session->client_do_cmds.clear();
-          launch_session->client_undo_cmds.clear();
-        }
+          if (app_iter != apps.end()) {
+            if (!app_iter->allow_client_commands) {
+              launch_session->client_do_cmds.clear();
+              launch_session->client_undo_cmds.clear();
+            }
 
-        if (current_appid == proc::input_only_app_id) {
-          launch_session->input_only = true;
-        }
+            auto err = seat_ptr->process->execute(*app_iter, launch_session);
+            if (err) {
+              seat::manager.release(seat_ptr);
+              tree.put("root.<xmlattr>.status_code", err);
+              tree.put("root.<xmlattr>.status_message",
+                err == 503
+                ? "Failed to initialize video capture/encoding. Is a display connected and turned on?"
+                : "Failed to start the specified application");
+              tree.put("root.gamesession", 0);
+              return;
+            }
+          }
+        } else {
+          // Single-seat: resuming the same app
+          BOOST_LOG(debug) << "Resuming app [" << proc::proc.get_last_run_app_name() << "] from launch app path...";
 
-        if (no_active_sessions && !proc::proc.virtual_display) {
-          display_device::configure_display(config::video, *launch_session);
-          if (video::probe_encoders()) {
-            tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 503);
-            tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+          if (!proc::proc.allow_client_commands || !named_cert_p->allow_client_commands) {
+            launch_session->client_do_cmds.clear();
+            launch_session->client_undo_cmds.clear();
+          }
 
-            return;
+          if (current_appid == proc::input_only_app_id) {
+            launch_session->input_only = true;
+          }
+
+          if (no_active_sessions && !proc::proc.virtual_display) {
+            display_device::configure_display(config::video, *launch_session);
+            if (video::probe_encoders()) {
+              tree.put("root.resume", 0);
+              tree.put("root.<xmlattr>.status_code", 503);
+              tree.put("root.<xmlattr>.status_message", "Failed to initialize video capture/encoding. Is a display connected and turned on?");
+
+              return;
+            }
           }
         }
       } else {
@@ -1311,7 +1446,16 @@ namespace nvhttp {
           launch_session->client_undo_cmds.clear();
         }
 
-        auto err = proc::proc.execute(*app_iter, launch_session);
+        int err;
+        if (config::multiseat.enabled && launch_session->seat) {
+          auto seat_ptr = std::static_pointer_cast<seat::seat_t>(launch_session->seat);
+          err = seat_ptr->process->execute(*app_iter, launch_session);
+          if (err) {
+            seat::manager.release(seat_ptr);
+          }
+        } else {
+          err = proc::proc.execute(*app_iter, launch_session);
+        }
         if (err) {
           tree.put("root.<xmlattr>.status_code", err);
           tree.put(
@@ -1482,14 +1626,41 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
-    rtsp_stream::terminate_sessions();
+    if (config::multiseat.enabled) {
+      // In multi-seat mode, only terminate the requesting client's session
+      auto client_uuid = named_cert_p->uuid;
+      BOOST_LOG(info) << "Multi-seat: cancelling session for client ["sv << named_cert_p->name << "] uuid ["sv << client_uuid << ']';
 
-    if (proc::proc.running() > 0) {
-      proc::proc.terminate();
+      // Terminate the streaming session for this client
+      rtsp_stream::terminate_session_by_uuid(client_uuid);
+
+      // Find and release the seat bound to this client
+      auto client_seat = seat::manager.find_by_client(client_uuid);
+      if (client_seat) {
+        BOOST_LOG(info) << "Multi-seat: releasing "sv << client_seat->id << " for client ["sv << named_cert_p->name << ']';
+        if (client_seat->process && client_seat->process->running() > 0) {
+          client_seat->process->terminate();
+        }
+        seat::manager.release(client_seat);
+      }
+
+      // Only revert global display config if no sessions remain
+      if (rtsp_stream::session_count() == 0) {
+        if (proc::proc.running() > 0) {
+          proc::proc.terminate();
+        }
+        display_device::revert_configuration();
+      }
+    } else {
+      rtsp_stream::terminate_sessions();
+
+      if (proc::proc.running() > 0) {
+        proc::proc.terminate();
+      }
+
+      // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
+      display_device::revert_configuration();
     }
-
-    // The config needs to be reverted regardless of whether "proc::proc.terminate()" was called or not.
-    display_device::revert_configuration();
   }
 
   void appasset(resp_https_t response, req_https_t request) {

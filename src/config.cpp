@@ -8,6 +8,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -593,6 +594,9 @@ namespace config {
     platf::appdata().string() + "/sunshine.conf",  // config file
     {},  // cmd args
     47989,  // Base port number
+    0,  // port_offset
+    false,  // worker_mode
+    {},  // credentials_dir
     "ipv4",  // Address family
     platf::appdata().string() + "/sunshine.log",  // log file
     false,  // notify_pre_releases
@@ -1222,6 +1226,15 @@ namespace config {
     config::sunshine.credentials_file = config::nvhttp.file_state;
     path_f(vars, "credentials_file", config::sunshine.credentials_file);
 
+    // Override credential paths if --credentials-dir was specified (multi-instance workers)
+    if (!sunshine.credentials_dir.empty()) {
+      auto cred_dir = std::filesystem::path(sunshine.credentials_dir);
+      nvhttp.pkey = (cred_dir / "cakey.pem").string();
+      nvhttp.cert = (cred_dir / "cacert.pem").string();
+      nvhttp.file_state = (cred_dir / "state.json").string();
+      config::sunshine.credentials_file = nvhttp.file_state;
+    }
+
     string_f(vars, "external_ip", nvhttp.external_ip);
     list_prep_cmd_f(vars, "global_prep_cmd", config::sunshine.prep_cmds);
     list_prep_cmd_f(vars, "global_state_cmd", config::sunshine.state_cmds);
@@ -1309,10 +1322,56 @@ namespace config {
     int_between_f(vars, "max_seats", multiseat.max_seats, {1, 16});
     bool_f(vars, "multiseat_auto_virtual_display", multiseat.auto_virtual_display);
     bool_f(vars, "multiseat_session_isolation", multiseat.session_isolation);
+    string_restricted_f(vars, "multiseat_mode", multiseat.mode, {"desktop_object"sv, "multi_instance"sv});
+
+    // Parse multiseat_users as comma-separated list of Windows account names
+    {
+      std::string users_str;
+      string_f(vars, "multiseat_users", users_str);
+      if (!users_str.empty()) {
+        multiseat.users.clear();
+        std::stringstream ss(users_str);
+        std::string user;
+        while (std::getline(ss, user, ',')) {
+          // trim whitespace
+          auto start = user.find_first_not_of(" \t");
+          auto end = user.find_last_not_of(" \t");
+          if (start != std::string::npos) {
+            multiseat.users.push_back(user.substr(start, end - start + 1));
+          }
+        }
+      }
+    }
+
+    // Parse multiseat_passwords as comma-separated list (matches multiseat_users order)
+    {
+      std::string passwords_str;
+      string_f(vars, "multiseat_passwords", passwords_str);
+      if (!passwords_str.empty()) {
+        multiseat.passwords.clear();
+        std::stringstream ss(passwords_str);
+        std::string pw;
+        while (std::getline(ss, pw, ',')) {
+          auto start = pw.find_first_not_of(" \t");
+          auto end = pw.find_last_not_of(" \t");
+          if (start != std::string::npos) {
+            multiseat.passwords.push_back(pw.substr(start, end - start + 1));
+          }
+        }
+      }
+    }
 
     int port = sunshine.port;
     int_between_f(vars, "port"s, port, {1024 + nvhttp::PORT_HTTPS, 65535 - rtsp_stream::RTSP_SETUP_PORT});
     sunshine.port = (std::uint16_t) port;
+
+    // Apply port offset from --port-offset CLI flag (for multi-instance workers)
+    if (sunshine.port_offset != 0) {
+      int offset_port = (int) sunshine.port + sunshine.port_offset;
+      if (offset_port >= 1024 && offset_port <= 65535 - rtsp_stream::RTSP_SETUP_PORT) {
+        sunshine.port = (std::uint16_t) offset_port;
+      }
+    }
 
     string_restricted_f(vars, "address_family", sunshine.address_family, {"ipv4"sv, "both"sv});
 
@@ -1413,7 +1472,13 @@ namespace config {
         service_admin_launch = true;
       }
 #endif
-      else if (*line == '-') {
+      else if (line == "--worker"sv) {
+        sunshine.worker_mode = true;
+      } else if (line == "--port-offset"sv && x + 1 < argc) {
+        sunshine.port_offset = std::atoi(argv[++x]);
+      } else if (line == "--credentials-dir"sv && x + 1 < argc) {
+        sunshine.credentials_dir = argv[++x];
+      } else if (*line == '-') {
         if (*(line + 1) == '-') {
           sunshine.cmd.name = line + 2;
           sunshine.cmd.argc = argc - x - 1;

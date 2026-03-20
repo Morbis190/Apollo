@@ -136,6 +136,13 @@ namespace proc {
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
     boost::process::v1::environment get_env();
+
+    /**
+     * @brief Get a mutable copy of the apps list.
+     * Used by multi-seat to create per-seat proc_t instances with the same app catalog.
+     */
+    std::vector<ctx_t> get_apps_copy() const { return _apps; }
+
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);

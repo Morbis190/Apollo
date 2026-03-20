@@ -5,6 +5,7 @@
 
 // local includes
 #include "seat.h"
+#include "config.h"
 #include "logging.h"
 #include "process.h"
 
@@ -12,6 +13,7 @@
   #include "platform/windows/misc.h"
   #include "platform/windows/virtual_display.h"
   #include "platform/windows/session_isolation.h"
+  #include "platform/windows/multiseat_launcher.h"
   #include "platform/common.h"
 #endif
 
@@ -103,10 +105,20 @@ namespace seat {
 
     if (_multi_seat) {
       _seats.clear();
+      auto env = proc::proc.get_env();
+      auto apps = proc::proc.get_apps_copy();
+
       for (int i = 0; i < max_seats; ++i) {
         auto s = std::make_shared<seat_t>();
         s->id = "seat-" + std::to_string(i);
-        s->process = &proc::proc;
+
+        // Each seat gets its own proc_t so it can run an independent app process
+        auto seat_env = env;
+        auto seat_apps = apps;
+        s->_owned_process = std::make_unique<proc::proc_t>(
+          std::move(seat_env), std::move(seat_apps));
+        s->process = s->_owned_process.get();
+
         _seats.push_back(std::move(s));
       }
       BOOST_LOG(info) << "Multi-seat enabled with "sv << max_seats << " seats"sv;
@@ -135,15 +147,15 @@ namespace seat {
     for (auto &s : _seats) {
       if (s->state == state_e::AVAILABLE) {
         s->state = state_e::BOUND;
-        // In multi-seat mode, each seat still uses the global process for now.
-        // Future phases will give each seat its own proc_t instance.
-        if (!s->process) {
-          s->process = &proc::proc;
-        }
 #ifdef _WIN32
         // Create an isolated desktop for this seat
         if (auto ds = platf::session_isolation::create_isolated_desktop(s->id)) {
           s->desktop_session = std::make_unique<platf::session_isolation::desktop_session_t>(std::move(*ds));
+
+          // Route the seat's proc_t to launch processes on this isolated desktop
+          if (s->process) {
+            s->process->set_desktop_name(s->desktop_session->desktop_name);
+          }
         }
 #endif
         BOOST_LOG(info) << "Seat acquired: "sv << s->id;
@@ -164,6 +176,12 @@ namespace seat {
     BOOST_LOG(info) << "Seat released: "sv << seat->id;
 
 #ifdef _WIN32
+    // Terminate worker process in multi_instance mode
+    if (seat->worker) {
+      platf::multiseat_launcher::terminate_worker(*seat->worker);
+      seat->worker.reset();
+    }
+
     // Clean up isolated desktop before virtual display
     if (seat->desktop_session) {
       platf::session_isolation::destroy_isolated_desktop(*seat->desktop_session);
@@ -175,10 +193,8 @@ namespace seat {
 #endif
 
     seat->state = state_e::AVAILABLE;
+    seat->client_uuid.clear();
     seat->bound_session.reset();
-
-    // In single-seat mode, keep the default seat around for reuse.
-    // In multi-seat mode, virtual displays are torn down above.
   }
 
   std::vector<seat_ptr> manager_t::active_seats() const {
@@ -233,6 +249,10 @@ namespace seat {
         BOOST_LOG(info) << "Force-releasing seat: "sv << seat_id;
 
 #ifdef _WIN32
+        if (s->worker) {
+          platf::multiseat_launcher::terminate_worker(*s->worker);
+          s->worker.reset();
+        }
         if (s->desktop_session) {
           platf::session_isolation::destroy_isolated_desktop(*s->desktop_session);
           s->desktop_session.reset();
@@ -241,12 +261,24 @@ namespace seat {
 #endif
 
         s->state = state_e::AVAILABLE;
+        s->client_uuid.clear();
         s->bound_session.reset();
         return true;
       }
     }
 
     return false;
+  }
+
+  seat_ptr manager_t::find_by_client(const std::string &client_uuid) const {
+    std::lock_guard lg(_mutex);
+
+    for (auto &s : _seats) {
+      if (s->state == state_e::BOUND && s->client_uuid == client_uuid) {
+        return s;
+      }
+    }
+    return nullptr;
   }
 
 }  // namespace seat

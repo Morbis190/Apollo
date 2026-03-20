@@ -1203,10 +1203,30 @@ namespace stream {
       }
 
       // Don't break until any pending sessions either expire or connect
-      // TODO (Phase 8): In multi-seat mode, check per-seat process state instead of global
-      if (proc::proc.running() == 0 && !has_session_awaiting_peer) {
-        BOOST_LOG(info) << "Process terminated"sv;
-        break;
+      if (!has_session_awaiting_peer) {
+        bool any_process_running = false;
+
+        if (config::multiseat.enabled) {
+          // In multi-seat mode, check if any session's seat process is still running.
+          // Note: _sessions lock is already held from line above.
+          for (auto &s : *server->_sessions) {
+            if (s->seat && s->seat->process && s->seat->process->running() > 0) {
+              any_process_running = true;
+              break;
+            }
+          }
+          // Also check the global proc as fallback
+          if (proc::proc.running() > 0) {
+            any_process_running = true;
+          }
+        } else {
+          any_process_running = proc::proc.running() > 0;
+        }
+
+        if (!any_process_running) {
+          BOOST_LOG(info) << "Process terminated"sv;
+          break;
+        }
       }
 
       server->iterate(150ms);

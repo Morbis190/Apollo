@@ -414,17 +414,28 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
+  // In worker mode, skip web UI, mDNS, UPnP, and system tray
   std::unique_ptr<platf::deinit_t> mDNS;
-  auto sync_mDNS = std::async(std::launch::async, [&mDNS]() {
-    if (config::sunshine.enable_discovery) {
-      mDNS = platf::publish::start();
-    }
-  });
-
   std::unique_ptr<platf::deinit_t> upnp_unmap;
-  auto sync_upnp = std::async(std::launch::async, [&upnp_unmap]() {
-    upnp_unmap = upnp::start();
-  });
+
+  if (!config::sunshine.worker_mode) {
+    auto sync_mDNS = std::async(std::launch::async, [&mDNS]() {
+      if (config::sunshine.enable_discovery) {
+        mDNS = platf::publish::start();
+      }
+    });
+
+    auto sync_upnp = std::async(std::launch::async, [&upnp_unmap]() {
+      upnp_unmap = upnp::start();
+    });
+
+    sync_mDNS.wait();
+    sync_upnp.wait();
+  } else {
+    BOOST_LOG(info) << "Worker mode: skipping web UI, mDNS, UPnP, and system tray"sv;
+    BOOST_LOG(info) << "Worker mode: port base = "sv << config::sunshine.port
+                    << " (offset "sv << config::sunshine.port_offset << ")"sv;
+  }
 
   // FIXME: Temporary workaround: Simple-Web_server needs to be updated or replaced
   if (shutdown_event->peek()) {
@@ -432,25 +443,23 @@ int main(int argc, char *argv[]) {
   }
 
   std::thread httpThread {nvhttp::start};
-  std::thread configThread {confighttp::start};
+  std::thread configThread;
+  if (!config::sunshine.worker_mode) {
+    configThread = std::thread{confighttp::start};
+  }
   std::thread rtspThread {rtsp_stream::start};
 
 #ifdef _WIN32
   // If we're using the default port and GameStream is enabled, warn the user
-  if (config::sunshine.port == 47989 && is_gamestream_enabled()) {
+  if (!config::sunshine.worker_mode && config::sunshine.port == 47989 && is_gamestream_enabled()) {
     BOOST_LOG(fatal) << "GameStream is still enabled in GeForce Experience! This *will* cause streaming problems with Apollo!"sv;
     BOOST_LOG(fatal) << "Disable GameStream on the SHIELD tab in GeForce Experience or change the Port setting on the Advanced tab in the Apollo Web UI."sv;
   }
 #endif
 
-  if (tray_is_enabled && config::sunshine.system_tray) {
+  if (!config::sunshine.worker_mode && tray_is_enabled && config::sunshine.system_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
 #ifdef _WIN32
-    // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,
-    // he tray icon would not appear even though Sunshine is running correctly otherwise.
-    // Restarting the service would allow the icon to appear normally.
-    // For now we will keep the Windows tray icon on a separate thread.
-    // Ideally, we would run the system tray on the main thread for all platforms.
     system_tray::init_tray_threaded();
 #else
     system_tray::init_tray();
@@ -463,7 +472,9 @@ int main(int argc, char *argv[]) {
   shutdown_event->view();
 
   httpThread.join();
-  configThread.join();
+  if (configThread.joinable()) {
+    configThread.join();
+  }
   rtspThread.join();
 
   task_pool.stop();

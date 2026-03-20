@@ -63,6 +63,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/virtual_display.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/session_isolation.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/session_isolation.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/multiseat_launcher.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/multiseat_launcher.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utils.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/utils.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/sudovda/sudovda-ioctl.h"
@@ -98,6 +100,7 @@ list(PREPEND PLATFORM_LIBRARIES
         userenv
         ws2_32
         wsock32
+        wtsapi32
 )
 
 if(SUNSHINE_ENABLE_TRAY)

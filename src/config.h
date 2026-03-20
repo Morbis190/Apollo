@@ -279,6 +279,9 @@ namespace config {
     } cmd;
 
     std::uint16_t port;
+    int port_offset = 0;            ///< Shift all ports by this offset (for multi-instance)
+    bool worker_mode = false;       ///< Headless mode: no web UI, no mDNS, no UPnP
+    std::string credentials_dir;    ///< Shared credentials directory (multi-instance)
     std::string address_family;
 
     std::string log_file;
@@ -295,6 +298,9 @@ namespace config {
     int max_seats = 4;
     bool auto_virtual_display = true;
     bool session_isolation = false;
+    std::string mode = "desktop_object";  ///< "desktop_object" or "multi_instance"
+    std::vector<std::string> users;       ///< Windows user accounts for multi_instance mode
+    std::vector<std::string> passwords;   ///< Passwords for multi_instance user accounts
   };
 
   extern video_t video;
